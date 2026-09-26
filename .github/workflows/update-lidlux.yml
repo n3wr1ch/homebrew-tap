@@ -1,0 +1,81 @@
+name: Update LidLux cask
+
+# LidLux 릴리스를 주기적으로 확인해 Casks/lidlux.rb 를 갱신한다.
+# 공개 릴리스만 읽으므로 별도 토큰(PAT)이 필요 없다.
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-lidlux
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.latest.outputs.changed }}
+      version: ${{ steps.latest.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare latest release with cask
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release view -R n3wr1ch/lidlux --json tagName -q .tagName)
+          version="${tag#v}"
+          current=$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/lidlux.rb)
+          echo "latest=$version cask=$current"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == "$current" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  update:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update version and checksum
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/release"
+          gh release download "v$VERSION" -R n3wr1ch/lidlux -D "$dir" \
+            -p "LidLux-$VERSION.zip" -p "LidLux-$VERSION.zip.sha256"
+          (cd "$dir" && shasum -a 256 -c "LidLux-$VERSION.zip.sha256")
+          sha=$(cut -d' ' -f1 "$dir/LidLux-$VERSION.zip.sha256")
+          sed -i '' \
+            -e "s/^  version \".*\"$/  version \"$VERSION\"/" \
+            -e "s/^  sha256 \".*\"$/  sha256 \"$sha\"/" \
+            Casks/lidlux.rb
+          git diff
+      - name: Validate cask
+        run: |
+          set -euo pipefail
+          taps="$(brew --repository)/Library/Taps/n3wr1ch"
+          mkdir -p "$taps"
+          ln -sfn "$GITHUB_WORKSPACE" "$taps/homebrew-tap"
+          brew trust n3wr1ch/tap 2>/dev/null || true
+          brew style Casks/lidlux.rb
+          brew audit --cask --strict --online n3wr1ch/tap/lidlux
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "lidlux $VERSION"
+          git push
